@@ -1,5 +1,11 @@
--- Improved by The Fedora Team. Originally created by Alurion.
+-- Improved by Valm and The Fedora Team.
 return function(Api, Status, Results)
+    local MaxScripts = 1500
+    local MaxReferences = 500
+    local MaxExposedScripts = 100
+    local MaxSourceLength = 300000
+    local MaxReportSourceLength = 12000
+
     local function SetStatus(Value)
         if Status and type(Status.SetValue) == "function" then
             pcall(Status.SetValue, Status, "Status: " .. tostring(Value))
@@ -12,18 +18,30 @@ return function(Api, Status, Results)
         end
     end
 
+    local function Notify(Value, Duration)
+        if Api and type(Api.Notify) == "function" then
+            pcall(Api.Notify, Api, tostring(Value), Duration or 3)
+        end
+    end
+
     local function GetService(ServiceName)
         local Success, Result = pcall(function()
             return Api:GetService(ServiceName)
         end)
-        return Success and Result or nil
+        if Success then
+            return Result
+        end
+        return nil
     end
 
     local function GetLocalPlayer()
         local Success, Result = pcall(function()
             return Api:GetLocalPlayer()
         end)
-        return Success and Result or nil
+        if Success then
+            return Result
+        end
+        return nil
     end
 
     local function GetPath(Object)
@@ -43,34 +61,132 @@ return function(Api, Status, Results)
         return Success and Result == true
     end
 
-    local function GetText(Object)
-        local Success, Result = pcall(function()
-            return Object.Source
-        end)
-        if Success and type(Result) == "string" and Result ~= "" then
-            return Result
-        end
-        return nil
-    end
-
-    local function GetClientSource(Object)
-        local Source = GetText(Object)
-        if Source then
-            return Source
-        end
+    local function GetDecompiler()
         local Decompiler = decompile
         if type(Decompiler) == "function" then
-            local Success, Result = pcall(Decompiler, Object)
-            if Success and type(Result) == "string" and Result ~= "" then
-                return Result
+            return Decompiler
+        end
+        if type(getgenv) == "function" then
+            local Success, Environment = pcall(getgenv)
+            if Success and type(Environment) == "table" and type(Environment.decompile) == "function" then
+                return Environment.decompile
             end
         end
         return nil
     end
 
-    local function AddPath(Path, Origin, Found, ServiceName)
-        Path = tostring(Path or ""):gsub("^%.", ""):gsub("%.$", "")
-        if Path == "" or #Found.List >= 200 then
+    local function GetBytecodeGetter()
+        local Getter = getscriptbytecode
+        if type(Getter) == "function" then
+            return Getter
+        end
+        if type(getgenv) == "function" then
+            local Success, Environment = pcall(getgenv)
+            if Success and type(Environment) == "table" and type(Environment.getscriptbytecode) == "function" then
+                return Environment.getscriptbytecode
+            end
+        end
+        return nil
+    end
+
+    local Decompiler = GetDecompiler()
+    local BytecodeGetter = GetBytecodeGetter()
+
+    local function GetSource(Object)
+        local SourceSuccess, Source = pcall(function()
+            return Object.Source
+        end)
+        if SourceSuccess and type(Source) == "string" and Source ~= "" then
+            return Source:sub(1, MaxSourceLength), "Source property"
+        end
+        if Decompiler then
+            local DecompileSuccess, DecompiledSource = pcall(Decompiler, Object)
+            if DecompileSuccess and type(DecompiledSource) == "string" and DecompiledSource ~= "" then
+                return DecompiledSource:sub(1, MaxSourceLength), "Decompiler"
+            end
+        end
+        return nil, nil
+    end
+
+    local function HasBytecode(Object)
+        if not BytecodeGetter then
+            return false
+        end
+        local Success, Bytecode = pcall(BytecodeGetter, Object)
+        return Success and type(Bytecode) == "string" and #Bytecode > 0
+    end
+
+    local function GetDescendants(Object)
+        local Success, Descendants = pcall(function()
+            return Object:GetDescendants()
+        end)
+        if Success and type(Descendants) == "table" then
+            return Descendants
+        end
+        return nil
+    end
+
+    local function CollectScripts()
+        local Scripts = {}
+        local Seen = {}
+        local function AddObject(Object)
+            if Object and not Seen[Object] and IsScript(Object) then
+                Seen[Object] = true
+                Scripts[#Scripts + 1] = Object
+            end
+        end
+        local GameSuccess, GameDescendants = pcall(function()
+            return game:GetDescendants()
+        end)
+        if GameSuccess and type(GameDescendants) == "table" then
+            for _, Object in ipairs(GameDescendants) do
+                AddObject(Object)
+                if #Scripts >= MaxScripts then
+                    break
+                end
+            end
+        end
+        if #Scripts < MaxScripts then
+            local ChildrenSuccess, Children = pcall(function()
+                return game:GetChildren()
+            end)
+            if ChildrenSuccess and type(Children) == "table" then
+                for _, Root in ipairs(Children) do
+                    AddObject(Root)
+                    local Descendants = GetDescendants(Root)
+                    if Descendants then
+                        for _, Object in ipairs(Descendants) do
+                            AddObject(Object)
+                            if #Scripts >= MaxScripts then
+                                break
+                            end
+                        end
+                    end
+                    if #Scripts >= MaxScripts then
+                        break
+                    end
+                end
+            end
+        end
+        local LocalPlayer = GetLocalPlayer()
+        if LocalPlayer and #Scripts < MaxScripts then
+            local Descendants = GetDescendants(LocalPlayer)
+            if Descendants then
+                for _, Object in ipairs(Descendants) do
+                    AddObject(Object)
+                    if #Scripts >= MaxScripts then
+                        break
+                    end
+                end
+            end
+        end
+        return Scripts
+    end
+
+    local function AddReference(Path, Origin, ServiceName, Found)
+        Path = tostring(Path or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        Path = Path:gsub("^%.+", ""):gsub("%.+$", "")
+        if Path == "" or #Found.List >= MaxReferences then
             return
         end
         local FullPath = ServiceName .. "." .. Path
@@ -80,175 +196,261 @@ return function(Api, Status, Results)
         Found.Seen[FullPath] = true
         Found.List[#Found.List + 1] = {
             Path = FullPath,
+            Service = ServiceName,
             Origin = Origin
         }
     end
 
-    local function ScanReferences(Found)
-        local LocalPlayer = GetLocalPlayer()
-        local ReplicatedStorage = GetService("ReplicatedStorage")
-        local Roots = {}
-        if ReplicatedStorage then
-            Roots[#Roots + 1] = ReplicatedStorage
-        end
-        if LocalPlayer then
-            local PlayerScripts
-            local PlayerGui
-            pcall(function()
-                PlayerScripts = LocalPlayer:FindFirstChildOfClass("PlayerScripts") or LocalPlayer:FindFirstChild("PlayerScripts")
-                PlayerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui") or LocalPlayer:FindFirstChild("PlayerGui")
-            end)
-            if PlayerScripts then
-                Roots[#Roots + 1] = PlayerScripts
+    local function ExtractChains(Source, Token, ServiceName, Origin, Found)
+        local SearchPosition = 1
+        while true do
+            local StartPosition, EndPosition = Source:find(Token, SearchPosition, true)
+            if not StartPosition then
+                break
             end
-            if PlayerGui then
-                Roots[#Roots + 1] = PlayerGui
-            end
-        end
-        local Scanned = 0
-        local SeenObjects = {}
-        for _, Root in ipairs(Roots) do
-            local Success, Descendants = pcall(function()
-                return Root:GetDescendants()
-            end)
-            if Success and type(Descendants) == "table" then
-                for _, Object in ipairs(Descendants) do
-                    if Scanned >= 250 then
-                        return Scanned
+            local Cursor = EndPosition + 1
+            local Parts = {}
+            while true do
+                local Remaining = Source:sub(Cursor)
+                local PropertyStart, PropertyEnd, PropertyName = Remaining:find("^%s*%.%s*([%w_]+)")
+                if PropertyName then
+                    Parts[#Parts + 1] = PropertyName
+                    Cursor = Cursor + PropertyEnd
+                else
+                    local MethodStart, MethodEnd, ChildName = Remaining:find("^%s*:%s*[%w_]+%s*%(%s*['\"]([^'\"]+)['\"]%s*%)")
+                    if ChildName then
+                        Parts[#Parts + 1] = ChildName
+                        Cursor = Cursor + MethodEnd
+                    else
+                        local IndexStart, IndexEnd, IndexName = Remaining:find("^%s*%[%s*['\"]([^'\"]+)['\"]%s*%]")
+                        if IndexName then
+                            Parts[#Parts + 1] = IndexName
+                            Cursor = Cursor + IndexEnd
+                        else
+                            break
+                        end
                     end
+                end
+            end
+            if #Parts > 0 then
+                AddReference(table.concat(Parts, "."), Origin, ServiceName, Found)
+            end
+            SearchPosition = EndPosition + 1
+        end
+    end
+
+    local function ScanSource(Source, Origin, Found)
+        for _, ServiceName in ipairs({"ServerScriptService", "ServerStorage"}) do
+            ExtractChains(Source, ServiceName, ServiceName, Origin, Found)
+            local VariablePattern = "local%s+([%a_][%w_]*)%s*=%s*game%s*:%s*GetService%s*%(%s*['\"]" .. ServiceName .. "['\"]%s*%)"
+            for VariableName in Source:gmatch(VariablePattern) do
+                ExtractChains(Source, VariableName, ServiceName, Origin, Found)
+            end
+            local PropertyVariablePattern = "local%s+([%a_][%w_]*)%s*=%s*game%s*%.%s*" .. ServiceName
+            for VariableName in Source:gmatch(PropertyVariablePattern) do
+                ExtractChains(Source, VariableName, ServiceName, Origin, Found)
+            end
+            local InlineMethodPattern = ServiceName .. "[^\n]-:%s*[%w_]+%s*%(%s*['\"]([^'\"]+)['\"]%s*%)"
+            for ChildName in Source:gmatch(InlineMethodPattern) do
+                AddReference(ChildName, Origin, ServiceName, Found)
+            end
+        end
+    end
+
+    local function ScanExposedServerScripts()
+        local Exposed = {}
+        local ServiceStates = {}
+        for _, ServiceName in ipairs({"ServerScriptService", "ServerStorage"}) do
+            local Service = GetService(ServiceName)
+            local Descendants = Service and GetDescendants(Service) or nil
+            ServiceStates[ServiceName] = Service ~= nil and Descendants ~= nil
+            if Descendants then
+                for _, Object in ipairs(Descendants) do
                     if IsScript(Object) then
-                        local ClassSuccess, IsClientScript = pcall(function()
-                            return Object:IsA("LocalScript") or Object:IsA("ModuleScript")
-                        end)
-                        if ClassSuccess and IsClientScript and not SeenObjects[Object] then
-                            SeenObjects[Object] = true
-                            Scanned = Scanned + 1
-                            local Source = GetClientSource(Object)
-                            if Source then
-                                Source = Source:sub(1, 250000)
-                                local Origin = GetPath(Object)
-                                for Path in Source:gmatch("ServerScriptService%.([%w_%.]+)") do
-                                    AddPath(Path, Origin, Found, "ServerScriptService")
-                                end
-                                for Path in Source:gmatch("ServerStorage%.([%w_%.]+)") do
-                                    AddPath(Path, Origin, Found, "ServerStorage")
-                                end
-                                for VarName, Quote, ServiceName in Source:gmatch("local%s+([%w_]+)%s*=%s*game:GetService%((['\"])([%w_]+)%2%)") do
-                                    if ServiceName == "ServerScriptService" or ServiceName == "ServerStorage" then
-                                        for Path in Source:gmatch(VarName .. "%.([%w_%.]+)") do
-                                            AddPath(Path, Origin, Found, ServiceName)
-                                        end
-                                    end
-                                end
-                            end
-                            if Scanned % 10 == 0 then
-                                task.wait()
-                            end
+                        local Source, SourceMethod = GetSource(Object)
+                        Exposed[#Exposed + 1] = {
+                            Path = GetPath(Object),
+                            Class = tostring(Object.ClassName),
+                            Source = Source,
+                            SourceMethod = SourceMethod,
+                            Service = ServiceName
+                        }
+                        if #Exposed >= MaxExposedScripts then
+                            return Exposed, ServiceStates
                         end
                     end
                 end
             end
         end
-        return Scanned
+        return Exposed, ServiceStates
     end
 
-    local function ScanExposedServerScripts()
-        local ServerScriptService = GetService("ServerScriptService")
-        local Exposed = {}
-        if not ServerScriptService then
-            return Exposed, false
-        end
-        local Success, Descendants = pcall(function()
-            return ServerScriptService:GetDescendants()
-        end)
-        if not Success or type(Descendants) ~= "table" then
-            return Exposed, false
-        end
-        for Index, Object in ipairs(Descendants) do
-            if #Exposed >= 50 then
-                break
+    local function BuildReferenceTree(Found)
+        local Roots = {}
+        for _, Entry in ipairs(Found.List) do
+            local Root = Roots[Entry.Service]
+            if not Root then
+                Root = {Children = {}, Order = {}}
+                Roots[Entry.Service] = Root
             end
-            if IsScript(Object) then
-                local ClassSuccess, ClassName = pcall(function()
-                    return Object.ClassName
-                end)
-                Exposed[#Exposed + 1] = {
-                    Path = GetPath(Object),
-                    Class = ClassSuccess and tostring(ClassName) or "Script",
-                    Source = GetText(Object)
-                }
-            end
-            if Index % 40 == 0 then
-                task.wait()
+            local Current = Root
+            for Part in Entry.Path:sub(#Entry.Service + 2):gmatch("[^%.]+") do
+                if not Current.Children[Part] then
+                    Current.Children[Part] = {Children = {}, Order = {}}
+                    Current.Order[#Current.Order + 1] = Part
+                end
+                Current = Current.Children[Part]
             end
         end
-        return Exposed, true
+        local Lines = {}
+        local function RenderNode(Node, Prefix)
+            for Index, Name in ipairs(Node.Order) do
+                local Last = Index == #Node.Order
+                Lines[#Lines + 1] = Prefix .. (Last and "└─ " or "├─ ") .. Name
+                RenderNode(Node.Children[Name], Prefix .. (Last and "   " or "│  "))
+            end
+        end
+        for _, ServiceName in ipairs({"ServerScriptService", "ServerStorage"}) do
+            local Root = Roots[ServiceName]
+            if Root then
+                Lines[#Lines + 1] = ServiceName
+                RenderNode(Root, "")
+            end
+        end
+        return Lines
     end
 
-    SetStatus("Scanning client-visible references...")
-    SetResults("Scanning...\n")
+    SetStatus("Scanning all client-visible script instances...")
+    SetResults("Scanning accessible script instances and bytecode...\n")
 
     local Success, ErrorMessage = pcall(function()
         local Lines = {
-            "VALM DEX / SSS VIEWER",
-            "Read-only scan. No scripts are created, moved, or rewritten.",
+            "VALM DEX / SCRIPT BYTECODE CONSTRUCTER",
+            "Read-only scan. No Instances are created and no script Source is written.",
             ""
         }
         local Found = {
             List = {},
             Seen = {}
         }
-        local Exposed, ServiceReadable = ScanExposedServerScripts()
-        local ScriptCount = ScanReferences(Found)
-
-        if #Exposed > 0 then
-            Lines[#Lines + 1] = "SERVER SCRIPTS EXPOSED TO THIS CLIENT"
-            for _, Entry in ipairs(Exposed) do
+        local Scripts = CollectScripts()
+        local DecodedCount = 0
+        local BytecodeCount = 0
+        local ServerSourceCount = 0
+        local SourceFailures = 0
+        local ServerRoots = {
+            ServerScriptService = true,
+            ServerStorage = true
+        }
+        local Exposed, ServiceStates = ScanExposedServerScripts()
+        local ExposedByPath = {}
+        for _, Entry in ipairs(Exposed) do
+            ExposedByPath[Entry.Path] = Entry
+            if Entry.Source then
+                ServerSourceCount = ServerSourceCount + 1
+            end
+        end
+        for Index, Object in ipairs(Scripts) do
+            local Source, SourceMethod = GetSource(Object)
+            if Source then
+                DecodedCount = DecodedCount + 1
+                local Origin = GetPath(Object)
+                ScanSource(Source, Origin, Found)
+                local IsServerObject = false
+                for ServiceName in pairs(ServerRoots) do
+                    local Service = GetService(ServiceName)
+                    if Service then
+                        local IsDescendantSuccess, IsDescendant = pcall(function()
+                            return Object:IsDescendantOf(Service)
+                        end)
+                        if IsDescendantSuccess and IsDescendant then
+                            IsServerObject = true
+                            break
+                        end
+                    end
+                end
+                if IsServerObject and not ExposedByPath[Origin] then
+                    ExposedByPath[Origin] = {
+                        Path = Origin,
+                        Class = tostring(Object.ClassName),
+                        Source = Source,
+                        SourceMethod = SourceMethod
+                    }
+                    ServerSourceCount = ServerSourceCount + 1
+                end
+            else
+                SourceFailures = SourceFailures + 1
+                if HasBytecode(Object) then
+                    BytecodeCount = BytecodeCount + 1
+                end
+            end
+            if Index % 12 == 0 then
+                SetStatus("Scanning script " .. tostring(Index) .. " of " .. tostring(#Scripts) .. "...")
+                task.wait()
+            end
+        end
+        local ExposedList = {}
+        for _, Entry in pairs(ExposedByPath) do
+            ExposedList[#ExposedList + 1] = Entry
+        end
+        table.sort(ExposedList, function(Left, Right)
+            return Left.Path < Right.Path
+        end)
+        if #ExposedList > 0 then
+            Lines[#Lines + 1] = "SERVER-SERVICE SCRIPT INSTANCES ACCESSIBLE TO THIS CLIENT"
+            for _, Entry in ipairs(ExposedList) do
                 Lines[#Lines + 1] = "[" .. Entry.Class .. "] " .. Entry.Path
                 if Entry.Source then
-                    Lines[#Lines + 1] = "Source: available through ordinary Source property access"
-                    Lines[#Lines + 1] = Entry.Source:sub(1, 5000)
+                    Lines[#Lines + 1] = "Decoded source via " .. tostring(Entry.SourceMethod or "available source") .. ":"
+                    Lines[#Lines + 1] = Entry.Source:sub(1, MaxReportSourceLength)
+                    if #Entry.Source > MaxReportSourceLength then
+                        Lines[#Lines + 1] = "[Source output shortened to fit the results panel]"
+                    end
                 else
-                    Lines[#Lines + 1] = "Source: Contents Unavailable"
+                    Lines[#Lines + 1] = "Source: unavailable; no source was fabricated."
                 end
                 Lines[#Lines + 1] = ""
             end
         else
-            Lines[#Lines + 1] = "ServerScriptService: Contents Unavailable"
-            Lines[#Lines + 1] = ServiceReadable and "No server Script instances are replicated to this client." or "ServerScriptService could not be enumerated from this client."
+            Lines[#Lines + 1] = "ServerScriptService / ServerStorage: No script instances are accessible to this client."
+            Lines[#Lines + 1] = ServiceStates.ServerScriptService and "ServerScriptService was enumerable, but no script descendants were exposed." or "ServerScriptService could not be enumerated in this client context."
+            Lines[#Lines + 1] = ServiceStates.ServerStorage and "ServerStorage was enumerable, but no script descendants were exposed." or "ServerStorage could not be enumerated in this client context."
             Lines[#Lines + 1] = ""
         end
-
         if #Found.List > 0 then
-            Lines[#Lines + 1] = "SERVER PATH REFERENCES FOUND IN CLIENT-READABLE SOURCE"
+            Lines[#Lines + 1] = "INFERRED SERVER PATH TREE"
+            Lines[#Lines + 1] = "Paths below were found in decompiled/readable script text; they are references, not recovered server files."
+            for _, TreeLine in ipairs(BuildReferenceTree(Found)) do
+                Lines[#Lines + 1] = TreeLine
+            end
+            Lines[#Lines + 1] = ""
+            Lines[#Lines + 1] = "REFERENCE DETAILS"
             for _, Entry in ipairs(Found.List) do
                 Lines[#Lines + 1] = Entry.Path
-                Lines[#Lines + 1] = "  Found in: " .. Entry.Origin
-                Lines[#Lines + 1] = "  Source: reference only; original server source is not available here."
+                Lines[#Lines + 1] = "  Referenced by: " .. Entry.Origin
             end
         else
-            Lines[#Lines + 1] = "No ServerScriptService or ServerStorage path references were found in the scanned client scripts."
+            Lines[#Lines + 1] = "No ServerScriptService or ServerStorage paths were found in the accessible script source."
         end
-
         Lines[#Lines + 1] = ""
-        Lines[#Lines + 1] = "Client scripts scanned: " .. tostring(ScriptCount)
+        Lines[#Lines + 1] = "Script instances scanned: " .. tostring(#Scripts)
+        Lines[#Lines + 1] = "Sources decoded/read: " .. tostring(DecodedCount)
+        Lines[#Lines + 1] = "Raw bytecode only: " .. tostring(BytecodeCount)
+        Lines[#Lines + 1] = "Source reads failed: " .. tostring(SourceFailures)
+        Lines[#Lines + 1] = "Server-service script instances exposed: " .. tostring(#ExposedList)
+        Lines[#Lines + 1] = "Server source texts available: " .. tostring(ServerSourceCount)
         Lines[#Lines + 1] = "Server path references: " .. tostring(#Found.List)
-        Lines[#Lines + 1] = "Server scripts exposed: " .. tostring(#Exposed)
         Lines[#Lines + 1] = ""
-        Lines[#Lines + 1] = "Note: client-side scanning cannot retrieve server-only source. Use an authorized Studio/server-side tool to inspect scripts that are not replicated."
+        Lines[#Lines + 1] = "The constructed tree is inferred from references. Only exposed script instances with readable or decompiled source are shown as decoded source. Hidden server-only scripts cannot be reconstructed from a client."
         SetResults(table.concat(Lines, "\n"))
-        SetStatus("Finished · " .. tostring(#Exposed) .. " exposed · " .. tostring(#Found.List) .. " references")
-        if type(Api.Notify) == "function" then
-            Api:Notify("SSS scan finished", 3)
-        end
+        SetStatus("Finished · " .. tostring(#Scripts) .. " scanned · " .. tostring(#ExposedList) .. " server scripts exposed")
+        Notify("Script Bytecode Constructer scan finished", 4)
     end)
 
     if not Success then
         SetStatus("Scan failed")
-        SetResults("SSS scan failed: " .. tostring(ErrorMessage))
-        if type(Api.Notify) == "function" then
-            Api:Notify("SSS scan failed", 4)
-        end
+        SetResults("Script Bytecode Constructer failed: " .. tostring(ErrorMessage))
+        Notify("Script Bytecode Constructer scan failed", 4)
         error(ErrorMessage)
     end
 end
