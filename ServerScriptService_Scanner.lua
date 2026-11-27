@@ -341,7 +341,7 @@ return function(Api, Status, Results)
                 end
             end
 
-            local DoubleQuotedInline = 'game:GetService%("' .. ServiceName .. '"%):%s*[%w_]+%s*%(%s*["']([^"']+)["']%s*%)'
+            local DoubleQuotedInline = "game:GetService%(\"" .. ServiceName .. "\"%):%s*[%w_]+%s*%(%s*[\"']([^\"']+)[\"']%s*%)"
             local SingleQuotedInline = "game:GetService%('" .. ServiceName .. "'%):%s*[%w_]+%s*%(%s*[\"']([^\"']+)[\"']%s*%)"
             for ChildName in Source:gmatch(DoubleQuotedInline) do
                 AddReference(ChildName, Origin, ServiceName, Found)
