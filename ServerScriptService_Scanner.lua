@@ -144,6 +144,21 @@ return function(Api, Status, Results)
         return nil
     end
 
+    local function IsUnderServerServices(Object)
+        for _, ServiceName in ipairs({"ServerScriptService", "ServerStorage"}) do
+            local Service = GetService(ServiceName)
+            if Service then
+                local Success, IsDescendant = pcall(function()
+                    return Object == Service or Object:IsDescendantOf(Service)
+                end)
+                if Success and IsDescendant then
+                    return true
+                end
+            end
+        end
+        return false
+    end
+
     local function CollectScripts()
         local Scripts = {}
         local Seen = {}
@@ -442,24 +457,12 @@ return function(Api, Status, Results)
             end
         end
         for Index, Object in ipairs(Scripts) do
-            local Source, SourceMethod = GetSource(Object)
+            local IsServerObject = IsUnderServerServices(Object)
+            local Source, SourceMethod = GetSource(Object, not IsServerObject)
             if Source then
                 DecodedCount = DecodedCount + 1
                 local Origin = GetPath(Object)
                 ScanSource(Source, Origin, Found)
-                local IsServerObject = false
-                for ServiceName in pairs(ServerRoots) do
-                    local Service = GetService(ServiceName)
-                    if Service then
-                        local IsDescendantSuccess, IsDescendant = pcall(function()
-                            return Object:IsDescendantOf(Service)
-                        end)
-                        if IsDescendantSuccess and IsDescendant then
-                            IsServerObject = true
-                            break
-                        end
-                    end
-                end
                 if IsServerObject and not ExposedByPath[Origin] then
                     ExposedByPath[Origin] = {
                         Path = Origin,
