@@ -1,6 +1,6 @@
 -- Improved by Valm and The Fedora Team.
 return function(Api, Status, Results)
-    local MaxScripts = 1500
+    local MaxScripts = 12000
     local MaxReferences = 500
     local MaxExposedScripts = 300
     local MaxServerObjects = 8000
@@ -106,17 +106,17 @@ return function(Api, Status, Results)
     local BytecodeGetter = GetBytecodeGetter()
 
     local function GetSource(Object, AllowDecompiler)
-        local SourceSuccess, Source = pcall(function()
-            return Object.Source
-        end)
-        if SourceSuccess and type(Source) == "string" and Source ~= "" then
-            return Source:sub(1, MaxSourceLength), "Source property"
-        end
         if AllowDecompiler ~= false and Decompiler then
             local DecompileSuccess, DecompiledSource = pcall(Decompiler, Object)
             if DecompileSuccess and type(DecompiledSource) == "string" and DecompiledSource ~= "" then
                 return DecompiledSource:sub(1, MaxSourceLength), "Decompiler"
             end
+        end
+        local SourceSuccess, Source = pcall(function()
+            return Object.Source
+        end)
+        if SourceSuccess and type(Source) == "string" and Source ~= "" then
+            return Source:sub(1, MaxSourceLength), "Source property"
         end
         return nil, nil
     end
@@ -278,18 +278,80 @@ return function(Api, Status, Results)
     end
 
     local function ScanSource(Source, Origin, Found)
-        for _, ServiceName in ipairs({"ServerScriptService", "ServerStorage"}) do
-            ExtractChains(Source, ServiceName, ServiceName, Origin, Found)
-            local VariablePattern = "local%s+([%a_][%w_]*)%s*=%s*game%s*:%s*GetService%s*%(%s*['\"]" .. ServiceName .. "['\"]%s*%)"
-            for VariableName in Source:gmatch(VariablePattern) do
-                ExtractChains(Source, VariableName, ServiceName, Origin, Found)
+        local ServiceNames = {"ServerScriptService", "ServerStorage"}
+        for _, ServiceName in ipairs(ServiceNames) do
+            for Path in Source:gmatch(ServiceName .. "%.([%w_%.]+)") do
+                AddReference(Path, Origin, ServiceName, Found)
             end
-            local PropertyVariablePattern = "local%s+([%a_][%w_]*)%s*=%s*game%s*%.%s*" .. ServiceName
-            for VariableName in Source:gmatch(PropertyVariablePattern) do
-                ExtractChains(Source, VariableName, ServiceName, Origin, Found)
+
+            local DoubleQuotedServicePattern = "local%s+([%a_][%w_]*)%s*=%s*game:GetService%(%"" .. ServiceName .. ""%)"
+            local SingleQuotedServicePattern = "local%s+([%a_][%w_]*)%s*=%s*game:GetService%('" .. ServiceName .. "'%)"
+            local PropertyServicePattern = "local%s+([%a_][%w_]*)%s*=%s*game%." .. ServiceName .. "%f[%W]"
+            local Aliases = {}
+
+            for VariableName in Source:gmatch(DoubleQuotedServicePattern) do
+                Aliases[VariableName] = {Service = ServiceName, Path = ""}
             end
-            local InlineMethodPattern = ServiceName .. "[^\n]-:%s*[%w_]+%s*%(%s*['\"]([^'\"]+)['\"]%s*%)"
-            for ChildName in Source:gmatch(InlineMethodPattern) do
+            for VariableName in Source:gmatch(SingleQuotedServicePattern) do
+                Aliases[VariableName] = {Service = ServiceName, Path = ""}
+            end
+            for VariableName in Source:gmatch(PropertyServicePattern) do
+                Aliases[VariableName] = {Service = ServiceName, Path = ""}
+            end
+
+            local Changed = true
+            local Pass = 0
+            while Changed and Pass < 12 do
+                Changed = false
+                Pass = Pass + 1
+                for VariableName, ParentName, ChildName in Source:gmatch("local%s+([%a_][%w_]*)%s*=%s*([%a_][%w_]*):%s*[%w_]+%s*%(%s*[\"']([^\"']+)[\"']%s*%)") do
+                    local Parent = Aliases[ParentName]
+                    if Parent then
+                        local NewPath = Parent.Path == "" and ChildName or Parent.Path .. "." .. ChildName
+                        if not Aliases[VariableName] or Aliases[VariableName].Path ~= NewPath then
+                            Aliases[VariableName] = {Service = ServiceName, Path = NewPath}
+                            Changed = true
+                        end
+                    end
+                end
+                for VariableName, ParentName, ChildName in Source:gmatch("local%s+([%a_][%w_]*)%s*=%s*([%a_][%w_]*)%.([%a_][%w_]*)") do
+                    local Parent = Aliases[ParentName]
+                    if Parent then
+                        local NewPath = Parent.Path == "" and ChildName or Parent.Path .. "." .. ChildName
+                        if not Aliases[VariableName] or Aliases[VariableName].Path ~= NewPath then
+                            Aliases[VariableName] = {Service = ServiceName, Path = NewPath}
+                            Changed = true
+                        end
+                    end
+                end
+            end
+
+            for VariableName, Alias in pairs(Aliases) do
+                for Path in Source:gmatch(VariableName .. "%.([%w_%.]+)") do
+                    local FullPath = Alias.Path == "" and Path or Alias.Path .. "." .. Path
+                    AddReference(FullPath, Origin, ServiceName, Found)
+                end
+                for ChildName in Source:gmatch(VariableName .. ":%s*[%w_]+%s*%(%s*[\"']([^\"']+)[\"']%s*%)") do
+                    local FullPath = Alias.Path == "" and ChildName or Alias.Path .. "." .. ChildName
+                    AddReference(FullPath, Origin, ServiceName, Found)
+                end
+                for ChildName in Source:gmatch(VariableName .. "%[%s*[\"']([^\"']+)[\"']%s*%]") do
+                    local FullPath = Alias.Path == "" and ChildName or Alias.Path .. "." .. ChildName
+                    AddReference(FullPath, Origin, ServiceName, Found)
+                end
+            end
+
+            local DoubleQuotedInline = "game:GetService%(%"" .. ServiceName .. ""%):%s*[%w_]+%s*%(%s*[\"']([^\"']+)[\"']%s*%)"
+            local SingleQuotedInline = "game:GetService%('" .. ServiceName .. "'%):%s*[%w_]+%s*%(%s*[\"']([^\"']+)[\"']%s*%)"
+            for ChildName in Source:gmatch(DoubleQuotedInline) do
+                AddReference(ChildName, Origin, ServiceName, Found)
+            end
+            for ChildName in Source:gmatch(SingleQuotedInline) do
+                AddReference(ChildName, Origin, ServiceName, Found)
+            end
+
+            local DirectMethodPattern = ServiceName .. ":%s*[%w_]+%s*%(%s*[\"']([^\"']+)[\"']%s*%)"
+            for ChildName in Source:gmatch(DirectMethodPattern) do
                 AddReference(ChildName, Origin, ServiceName, Found)
             end
         end
@@ -437,7 +499,7 @@ return function(Api, Status, Results)
     local Success, ErrorMessage = pcall(function()
         local Lines = {
             "VALM DEX / SCRIPT BYTECODE CONSTRUCTER",
-            "Read-only scan. No Instances are created and no script Source is written.",
+            "Read-only reconstruction. Source is decompiled from accessible client scripts; no server objects or Source properties are written.",
             ""
         }
         local Found = {
@@ -551,7 +613,7 @@ return function(Api, Status, Results)
         end
         Lines[#Lines + 1] = ""
         Lines[#Lines + 1] = "Script instances scanned: " .. tostring(#Scripts)
-        Lines[#Lines + 1] = "Sources decoded/read: " .. tostring(DecodedCount)
+        Lines[#Lines + 1] = "Sources decompiled/read: " .. tostring(DecodedCount)
         Lines[#Lines + 1] = "Raw bytecode only: " .. tostring(BytecodeCount)
         Lines[#Lines + 1] = "Source reads failed: " .. tostring(SourceFailures)
         Lines[#Lines + 1] = "Server-service objects enumerated: " .. tostring(ServiceObjectCount)
@@ -560,7 +622,7 @@ return function(Api, Status, Results)
         Lines[#Lines + 1] = "Server source texts available: " .. tostring(ServerSourceCount)
         Lines[#Lines + 1] = "Server path references: " .. tostring(#Found.List)
         Lines[#Lines + 1] = ""
-        Lines[#Lines + 1] = "The server-service tree is populated from actual Instances returned by GetChildren()/GetDescendants(). Source is read only through the Source property, matching Fed Explorer. Decompilation is intentionally not attempted for server-service scripts. Instances not replicated or exposed to this client cannot be listed or reconstructed."
+        Lines[#Lines + 1] = "The inferred tree is built from ServerScriptService and ServerStorage references found in decompiled client-visible scripts. Fed Explorer enumerates actual children, but hidden server-only children are not replicated to the client. The tree is a reference-based reconstruction, not recovered original server source."
         SetResults(table.concat(Lines, "\n"))
         SetStatus("Finished · " .. tostring(#Scripts) .. " scanned · " .. tostring(#ExposedList) .. " server scripts exposed")
         Notify("Script Bytecode Constructer scan finished", 4)
