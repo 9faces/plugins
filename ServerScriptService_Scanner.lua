@@ -42,6 +42,11 @@ return function(Api, Status, Results)
         return nil
     end
 
+    local ServerServices = {
+        ServerScriptService = GetService("ServerScriptService"),
+        ServerStorage = GetService("ServerStorage")
+    }
+
     local function GetLocalPlayer()
         local Success, Result = pcall(function()
             return Api:GetLocalPlayer()
@@ -146,7 +151,7 @@ return function(Api, Status, Results)
 
     local function IsUnderServerServices(Object)
         for _, ServiceName in ipairs({"ServerScriptService", "ServerStorage"}) do
-            local Service = GetService(ServiceName)
+            local Service = ServerServices[ServiceName]
             if Service then
                 local Success, IsDescendant = pcall(function()
                     return Object == Service or Object:IsDescendantOf(Service)
@@ -327,7 +332,7 @@ return function(Api, Status, Results)
         end
 
         for _, ServiceName in ipairs({"ServerScriptService", "ServerStorage"}) do
-            local Service = GetService(ServiceName)
+            local Service = ServerServices[ServiceName]
             ServiceStates[ServiceName] = {
                 Available = Service ~= nil,
                 Enumerated = false,
