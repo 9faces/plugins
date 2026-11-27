@@ -2,7 +2,9 @@
 return function(Api, Status, Results)
     local MaxScripts = 1500
     local MaxReferences = 500
-    local MaxExposedScripts = 100
+    local MaxExposedScripts = 300
+    local MaxServerObjects = 8000
+    local MaxServerTreeLines = 700
     local MaxSourceLength = 300000
     local MaxReportSourceLength = 12000
 
@@ -28,8 +30,14 @@ return function(Api, Status, Results)
         local Success, Result = pcall(function()
             return Api:GetService(ServiceName)
         end)
-        if Success then
+        if Success and Result then
             return Result
+        end
+        local DirectSuccess, DirectResult = pcall(function()
+            return game:GetService(ServiceName)
+        end)
+        if DirectSuccess then
+            return DirectResult
         end
         return nil
     end
@@ -92,14 +100,14 @@ return function(Api, Status, Results)
     local Decompiler = GetDecompiler()
     local BytecodeGetter = GetBytecodeGetter()
 
-    local function GetSource(Object)
+    local function GetSource(Object, AllowDecompiler)
         local SourceSuccess, Source = pcall(function()
             return Object.Source
         end)
         if SourceSuccess and type(Source) == "string" and Source ~= "" then
             return Source:sub(1, MaxSourceLength), "Source property"
         end
-        if Decompiler then
+        if AllowDecompiler ~= false and Decompiler then
             local DecompileSuccess, DecompiledSource = pcall(Decompiler, Object)
             if DecompileSuccess and type(DecompiledSource) == "string" and DecompiledSource ~= "" then
                 return DecompiledSource:sub(1, MaxSourceLength), "Decompiler"
@@ -122,6 +130,16 @@ return function(Api, Status, Results)
         end)
         if Success and type(Descendants) == "table" then
             return Descendants
+        end
+        return nil
+    end
+
+    local function GetChildren(Object)
+        local Success, Children = pcall(function()
+            return Object:GetChildren()
+        end)
+        if Success and type(Children) == "table" then
+            return Children
         end
         return nil
     end
@@ -259,30 +277,103 @@ return function(Api, Status, Results)
 
     local function ScanExposedServerScripts()
         local Exposed = {}
+        local VisibleObjects = {}
         local ServiceStates = {}
+        local ServiceObjectCount = 0
+        local SeenObjects = {}
+
+        local function AddVisibleObject(Object, ServiceName)
+            if not Object or SeenObjects[Object] then
+                return
+            end
+            SeenObjects[Object] = true
+            ServiceObjectCount = ServiceObjectCount + 1
+            local ClassName = "Instance"
+            pcall(function()
+                ClassName = Object.ClassName
+            end)
+            if #VisibleObjects < MaxServerTreeLines then
+                VisibleObjects[#VisibleObjects + 1] = {
+                    Path = GetPath(Object),
+                    Class = tostring(ClassName),
+                    Service = ServiceName
+                }
+            end
+            if IsScript(Object) and #Exposed < MaxExposedScripts then
+                local ScriptSource = GetSource(Object, false)
+                Exposed[#Exposed + 1] = {
+                    Path = GetPath(Object),
+                    Class = tostring(ClassName),
+                    Source = ScriptSource,
+                    SourceMethod = ScriptSource and "Source property" or nil,
+                    Service = ServiceName
+                }
+            end
+        end
+
         for _, ServiceName in ipairs({"ServerScriptService", "ServerStorage"}) do
             local Service = GetService(ServiceName)
-            local Descendants = Service and GetDescendants(Service) or nil
-            ServiceStates[ServiceName] = Service ~= nil and Descendants ~= nil
-            if Descendants then
-                for _, Object in ipairs(Descendants) do
-                    if IsScript(Object) then
-                        local Source, SourceMethod = GetSource(Object)
-                        Exposed[#Exposed + 1] = {
-                            Path = GetPath(Object),
-                            Class = tostring(Object.ClassName),
-                            Source = Source,
-                            SourceMethod = SourceMethod,
-                            Service = ServiceName
-                        }
-                        if #Exposed >= MaxExposedScripts then
-                            return Exposed, ServiceStates
+            ServiceStates[ServiceName] = {
+                Available = Service ~= nil,
+                Enumerated = false,
+                Method = "GetChildren"
+            }
+            if Service then
+                local Queue = {{Object = Service, Depth = 0}}
+                local QueueIndex = 1
+                local ServiceSeen = {[Service] = true}
+                ServiceStates[ServiceName].Enumerated = true
+                while QueueIndex <= #Queue and ServiceObjectCount < MaxServerObjects do
+                    local Current = Queue[QueueIndex]
+                    QueueIndex = QueueIndex + 1
+                    local Children = GetChildren(Current.Object)
+                    if not Children then
+                        if Current.Depth == 0 then
+                            ServiceStates[ServiceName].Enumerated = false
+                        end
+                    else
+                        for _, Child in ipairs(Children) do
+                            if Child and not ServiceSeen[Child] then
+                                ServiceSeen[Child] = true
+                                AddVisibleObject(Child, ServiceName)
+                                if Current.Depth < 100 and ServiceObjectCount < MaxServerObjects then
+                                    Queue[#Queue + 1] = {
+                                        Object = Child,
+                                        Depth = Current.Depth + 1
+                                    }
+                                end
+                            end
+                            if ServiceObjectCount >= MaxServerObjects then
+                                break
+                            end
+                        end
+                    end
+                    if QueueIndex % 80 == 0 then
+                        task.wait()
+                    end
+                end
+                local Descendants = GetDescendants(Service)
+                if Descendants then
+                    for _, Object in ipairs(Descendants) do
+                        AddVisibleObject(Object, ServiceName)
+                        if ServiceObjectCount >= MaxServerObjects then
+                            break
                         end
                     end
                 end
             end
         end
-        return Exposed, ServiceStates
+
+        table.sort(VisibleObjects, function(Left, Right)
+            if Left.Service == Right.Service then
+                return Left.Path < Right.Path
+            end
+            return Left.Service < Right.Service
+        end)
+        table.sort(Exposed, function(Left, Right)
+            return Left.Path < Right.Path
+        end)
+        return Exposed, ServiceStates, VisibleObjects, ServiceObjectCount
     end
 
     local function BuildReferenceTree(Found)
@@ -342,7 +433,7 @@ return function(Api, Status, Results)
             ServerScriptService = true,
             ServerStorage = true
         }
-        local Exposed, ServiceStates = ScanExposedServerScripts()
+        local Exposed, ServiceStates, VisibleObjects, ServiceObjectCount = ScanExposedServerScripts()
         local ExposedByPath = {}
         for _, Entry in ipairs(Exposed) do
             ExposedByPath[Entry.Path] = Entry
@@ -396,6 +487,16 @@ return function(Api, Status, Results)
         table.sort(ExposedList, function(Left, Right)
             return Left.Path < Right.Path
         end)
+        if #VisibleObjects > 0 then
+            Lines[#Lines + 1] = "VISIBLE SERVER-SERVICE INSTANCE TREE"
+            for _, Entry in ipairs(VisibleObjects) do
+                Lines[#Lines + 1] = "[" .. Entry.Class .. "] " .. Entry.Path
+            end
+            Lines[#Lines + 1] = ""
+        else
+            Lines[#Lines + 1] = "No child instances were returned by GetChildren() or GetDescendants() for ServerScriptService or ServerStorage."
+            Lines[#Lines + 1] = ""
+        end
         if #ExposedList > 0 then
             Lines[#Lines + 1] = "SERVER-SERVICE SCRIPT INSTANCES ACCESSIBLE TO THIS CLIENT"
             for _, Entry in ipairs(ExposedList) do
@@ -412,9 +513,17 @@ return function(Api, Status, Results)
                 Lines[#Lines + 1] = ""
             end
         else
-            Lines[#Lines + 1] = "ServerScriptService / ServerStorage: No script instances are accessible to this client."
-            Lines[#Lines + 1] = ServiceStates.ServerScriptService and "ServerScriptService was enumerable, but no script descendants were exposed." or "ServerScriptService could not be enumerated in this client context."
-            Lines[#Lines + 1] = ServiceStates.ServerStorage and "ServerStorage was enumerable, but no script descendants were exposed." or "ServerStorage could not be enumerated in this client context."
+            Lines[#Lines + 1] = "No Script, LocalScript, or ModuleScript instances were found under the accessible server-service trees."
+            for _, ServiceName in ipairs({"ServerScriptService", "ServerStorage"}) do
+                local State = ServiceStates[ServiceName] or {}
+                if not State.Available then
+                    Lines[#Lines + 1] = ServiceName .. ": service unavailable"
+                elseif not State.Enumerated then
+                    Lines[#Lines + 1] = ServiceName .. ": GetChildren() enumeration failed"
+                else
+                    Lines[#Lines + 1] = ServiceName .. ": GetChildren() enumeration completed"
+                end
+            end
             Lines[#Lines + 1] = ""
         end
         if #Found.List > 0 then
@@ -437,11 +546,13 @@ return function(Api, Status, Results)
         Lines[#Lines + 1] = "Sources decoded/read: " .. tostring(DecodedCount)
         Lines[#Lines + 1] = "Raw bytecode only: " .. tostring(BytecodeCount)
         Lines[#Lines + 1] = "Source reads failed: " .. tostring(SourceFailures)
+        Lines[#Lines + 1] = "Server-service objects enumerated: " .. tostring(ServiceObjectCount)
+        Lines[#Lines + 1] = "Server-service objects listed: " .. tostring(#VisibleObjects)
         Lines[#Lines + 1] = "Server-service script instances exposed: " .. tostring(#ExposedList)
         Lines[#Lines + 1] = "Server source texts available: " .. tostring(ServerSourceCount)
         Lines[#Lines + 1] = "Server path references: " .. tostring(#Found.List)
         Lines[#Lines + 1] = ""
-        Lines[#Lines + 1] = "The constructed tree is inferred from references. Only exposed script instances with readable or decompiled source are shown as decoded source. Hidden server-only scripts cannot be reconstructed from a client."
+        Lines[#Lines + 1] = "The server-service tree is populated from actual Instances returned by GetChildren()/GetDescendants(). Source is read only through the Source property, matching Fed Explorer. Decompilation is intentionally not attempted for server-service scripts. Instances not replicated or exposed to this client cannot be listed or reconstructed."
         SetResults(table.concat(Lines, "\n"))
         SetStatus("Finished · " .. tostring(#Scripts) .. " scanned · " .. tostring(#ExposedList) .. " server scripts exposed")
         Notify("Script Bytecode Constructer scan finished", 4)
