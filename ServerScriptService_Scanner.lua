@@ -284,7 +284,7 @@ return function(Api, Status, Results)
                 AddReference(Path, Origin, ServiceName, Found)
             end
 
-            local DoubleQuotedServicePattern = "local%s+([%a_][%w_]*)%s*=%s*game:GetService%(%"" .. ServiceName .. ""%)"
+            local DoubleQuotedServicePattern = 'local%s+([%a_][%w_]*)%s*=%s*game:GetService%("' .. ServiceName .. '"%)'
             local SingleQuotedServicePattern = "local%s+([%a_][%w_]*)%s*=%s*game:GetService%('" .. ServiceName .. "'%)"
             local PropertyServicePattern = "local%s+([%a_][%w_]*)%s*=%s*game%." .. ServiceName .. "%f[%W]"
             local Aliases = {}
@@ -341,7 +341,7 @@ return function(Api, Status, Results)
                 end
             end
 
-            local DoubleQuotedInline = "game:GetService%(%"" .. ServiceName .. ""%):%s*[%w_]+%s*%(%s*[\"']([^\"']+)[\"']%s*%)"
+            local DoubleQuotedInline = 'game:GetService%("' .. ServiceName .. '"%):%s*[%w_]+%s*%(%s*["']([^"']+)["']%s*%)'
             local SingleQuotedInline = "game:GetService%('" .. ServiceName .. "'%):%s*[%w_]+%s*%(%s*[\"']([^\"']+)[\"']%s*%)"
             for ChildName in Source:gmatch(DoubleQuotedInline) do
                 AddReference(ChildName, Origin, ServiceName, Found)
